@@ -1,0 +1,24 @@
+{
+  "name": "telegram-admin-backend",
+  "version": "1.0.0",
+  "description": "Production-ready Telegram Admin Backend on Vercel Serverless + Firebase Admin + OpenRouter",
+  "private": true,
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "vercel-build": "echo 'Serverless functions only — no static build needed'",
+    "typecheck": "tsc --noEmit",
+    "dev": "vercel dev",
+    "deploy": "vercel --prod",
+    "set-webhook": "node -e \"require('https').get('https://api.telegram.org/bot'+process.env.TELEGRAM_BOT_TOKEN+'/setWebhook?url='+encodeURIComponent(process.env.WEBHOOK_URL)+'&secret_token='+encodeURIComponent(process.env.TELEGRAM_WEBHOOK_SECRET||''), r=>r.pipe(process.stdout))\""
+  },
+  "dependencies": {
+    "firebase-admin": "^12.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@vercel/node": "^3.2.0",
+    "typescript": "^5.4.5"
+  }
+}
