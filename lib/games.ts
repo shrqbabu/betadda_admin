@@ -10,13 +10,14 @@ import { adminLogs } from './logs';
 import { walletService } from './wallet';
 import { logger } from './logger';
 
-export type GameKind = 'poker' | 'ludo' | 'joker' | '9card';
+export type GameKind = 'poker' | 'ludo' | 'joker' | '9card' | 'tambola';
 
 const COLLECTION_MAP: Record<GameKind, string> = {
   poker:   'pokerTables',
   ludo:    'ludoTables',
   joker:   'jokerPairTables',
   '9card': 'nineCardTables',
+  tambola: 'tambolaTables',
 };
 
 export const GAME_LABELS: Record<GameKind, string> = {
@@ -24,6 +25,7 @@ export const GAME_LABELS: Record<GameKind, string> = {
   ludo:  '🎲 Ludo',
   joker: '🎭 Joker',
   '9card':'9️⃣ 9-Card',
+  tambola:'🎟 Tambola',
 };
 
 function collectionFor(kind: GameKind): string { return COLLECTION_MAP[kind]; }
@@ -97,6 +99,13 @@ export interface CreateNineCardInput {
   name: string;
   bootAmount: number;
   minPlayers?: number;
+  maxPlayers?: number;
+  adminId: number;
+}
+
+export interface CreateTambolaInput {
+  name: string;
+  entryFee: number;
   maxPlayers?: number;
   adminId: number;
 }
@@ -258,6 +267,39 @@ export const gameService = {
     return { ok: true, id: ref.id };
   },
 
+  // ─── Tambola (Housie) ─────────────────────────────────
+  // Schema EXACTLY center-main/src/tambola/action.ts ke join/start ke
+  // according — round idempotency keys ke liye zaroori hai.
+  async createTambolaTable(input: CreateTambolaInput): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
+    if (!input.name)         return { ok: false, error: 'name required' };
+    if (input.entryFee <= 0) return { ok: false, error: 'entryFee must be positive' };
+
+    const ref = db().collection('tambolaTables').doc();
+    const now = FieldValue.serverTimestamp();
+    const doc = {
+      name: input.name,
+      entryFee: input.entryFee,
+      maxPlayers: input.maxPlayers ?? 10,
+      players: [],
+      playerNames: {},
+      playerAvatars: {},
+      prizePool: 0,
+      round: 0,
+      status: 'waiting',
+      createdBy: String(input.adminId),
+      createdAt: now,
+      updatedAt: now,
+    };
+    await ref.set(doc);
+    await adminLogs.record({
+      telegramId: input.adminId, module: 'games', action: 'create_tambola',
+      target: ref.id, amount: input.entryFee, result: 'success',
+      metadata: { name: input.name },
+    });
+    logger.info('games.tambola.created', { id: ref.id, name: input.name });
+    return { ok: true, id: ref.id };
+  },
+
   // ─── Listing / management (works across all games) ────
   async listTables(kind: GameKind, limit = 20): Promise<GameTableSummary[]> {
     const coll = collectionFor(kind);
@@ -279,6 +321,14 @@ export const gameService = {
   /** Extract player uids from the many possible shapes. */
   extractPlayers(kind: GameKind, raw: Record<string, unknown>): Array<{ uid: string; chips: number; name?: string }> {
     const players = raw.players;
+    // Tambola/Ludo/Joker: array of uid STRINGS; names map mein, stake = entryFee
+    if (Array.isArray(players) && players.length > 0 && typeof players[0] === 'string') {
+      const names = (raw.playerNames || {}) as Record<string, string>;
+      const entryFee = Number(raw.entryFee || 0);
+      return (players as string[]).map(uid => ({
+        uid, chips: entryFee, name: names[uid],
+      }));
+    }
     // Poker: array of { uid, chips, name, ... }
     if (Array.isArray(players)) {
       return players.map(p => ({
@@ -308,8 +358,21 @@ export const gameService = {
     const raw  = t.raw;
 
     if (Array.isArray(raw.players)) {
-      const remaining = raw.players.filter(p => (p as { uid?: string }).uid !== uid);
-      await db().collection(coll).doc(tableId).set({ players: remaining, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+      // String-array schema (tambola/ludo/joker): uid seedha array mein,
+      // names/avatars maps se bhi hatao aur prizePool se entry minus karo
+      if (raw.players.length > 0 && typeof raw.players[0] === 'string') {
+        const remaining = (raw.players as string[]).filter(p => p !== uid);
+        await db().collection(coll).doc(tableId).set({
+          players: remaining,
+          [`playerNames.${uid}`]:   FieldValue.delete(),
+          [`playerAvatars.${uid}`]: FieldValue.delete(),
+          prizePool: FieldValue.increment(-target.chips),
+          updatedAt: FieldValue.serverTimestamp(),
+        }, { merge: true });
+      } else {
+        const remaining = raw.players.filter(p => (p as { uid?: string }).uid !== uid);
+        await db().collection(coll).doc(tableId).set({ players: remaining, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+      }
     } else if (raw.players && typeof raw.players === 'object') {
       await db().collection(coll).doc(tableId).set({
         [`players.${uid}`]: FieldValue.delete(),
@@ -358,6 +421,10 @@ export const gameService = {
     const emptyPlayers = Array.isArray(t.raw.players) ? [] : {};
     await db().collection(coll).doc(tableId).set({
       status: 'refunded', players: emptyPlayers, pot: 0, prizePool: 0,
+      // Tambola/Ludo: round bump zaroori — table reuse pe idempotency keys fresh rahen
+      ...(kind === 'tambola' || kind === 'ludo'
+        ? { playerNames: {}, playerAvatars: {}, round: FieldValue.increment(1) }
+        : {}),
       updatedAt: FieldValue.serverTimestamp(),
     }, { merge: true });
 

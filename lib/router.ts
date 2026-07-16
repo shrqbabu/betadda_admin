@@ -202,6 +202,7 @@ function gamesMenuView() {
     keyboard: kb.build([
       [kb.button(GAME_LABELS.poker,   CB.gamePicker('poker')),  kb.button(GAME_LABELS.ludo,   CB.gamePicker('ludo'))],
       [kb.button(GAME_LABELS.joker,   CB.gamePicker('joker')),  kb.button(GAME_LABELS['9card'],CB.gamePicker('9card'))],
+      [kb.button(GAME_LABELS.tambola, CB.gamePicker('tambola'))],
       backHomeRow(CB.home),
     ]),
   };
@@ -842,7 +843,7 @@ async function handleWithdrawRejectReason(chatId: number, telegramId: number, te
 
 // ─── Games ──────────────────────────────────────────────────────────────────
 function isGameKind(v: string): v is GameKind {
-  return v === 'poker' || v === 'ludo' || v === 'joker' || v === '9card';
+  return v === 'poker' || v === 'ludo' || v === 'joker' || v === '9card' || v === 'tambola';
 }
 
 async function handleGameCallback(chatId: number, telegramId: number, action: string, args: string[], msgId?: number): Promise<void> {
@@ -888,6 +889,14 @@ async function handleGameCallback(chatId: number, telegramId: number, action: st
         '',
         'Send one line:',
         '<code>name=9 Rank Card | boot=25 | min=2 | max=2</code>',
+      ].join('\n'),
+      tambola: [
+        '➕ <b>Create Tambola Table</b>',
+        '',
+        'Send one line:',
+        '<code>name=Housie Room | entry=10 | max=10</code>',
+        '',
+        'Prizes auto: Early 5 + 3 Lines + Full House (pool ka 90%).',
       ].join('\n'),
     };
     return void telegram.sendMessage({
@@ -941,6 +950,10 @@ async function handleGameCallback(chatId: number, telegramId: number, action: st
     } else if (kind === '9card') {
       lines.push(`<b>Boot:</b> ₹${r.bootAmount || 0}`);
       lines.push(`<b>Call:</b> ₹${r.currentCallAmount || 0}`);
+      lines.push(`<b>Round:</b> ${r.round || 0}`);
+    } else if (kind === 'tambola') {
+      lines.push(`<b>Entry:</b> ₹${r.entryFee || 0}`);
+      lines.push(`<b>Prize Pool:</b> ₹${r.prizePool || 0}`);
       lines.push(`<b>Round:</b> ${r.round || 0}`);
     }
     const players = gameService.extractPlayers(kind, r);
@@ -1048,6 +1061,13 @@ async function handleGameCreateForm(chatId: number, telegramId: number, text: st
       entryFee: num('entry', 100),
       maxPlayers: num('max', 2),
       hostId: params.host || null,
+      adminId: telegramId,
+    });
+  } else if (kind === 'tambola') {
+    result = await gameService.createTambolaTable({
+      name: name || 'Housie Room',
+      entryFee: num('entry', 10),
+      maxPlayers: num('max', 10),
       adminId: telegramId,
     });
   } else {
@@ -1274,7 +1294,8 @@ async function handleReport(chatId: number, msgId: number | undefined, action: s
           `Poker:    total ${r.poker.total}, running ${r.poker.running}`,
           `Ludo:     total ${r.ludo.total}, running ${r.ludo.running}`,
           `Joker:    total ${r.joker.total}, running ${r.joker.running}`,
-          `9-Card:   total ${r.ninecard.total}, running ${r.ninecard.running}`].join('\n');
+          `9-Card:   total ${r.ninecard.total}, running ${r.ninecard.running}`,
+          `Tambola:  total ${r.tambola.total}, running ${r.tambola.running}`].join('\n');
         break;
       }
       default: text = '❓ Unknown report';

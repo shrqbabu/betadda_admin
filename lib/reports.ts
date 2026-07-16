@@ -17,6 +17,7 @@ export interface GamesReport    {
   ludo:  { total: number; running: number };
   joker: { total: number; running: number };
   ninecard: { total: number; running: number };
+  tambola:  { total: number; running: number };
 }
 
 // Firestore Timestamp shape check
@@ -172,17 +173,21 @@ export const reportsService = {
         return snap.size;
       }
     }
-    const [pt, pr, lt, lr, jt, jr, nt, nr] = await Promise.all([
-      totalCount('poker_tables'),   runningCount('poker_tables'),
-      totalCount('ludo_tables'),    runningCount('ludo_tables'),
-      totalCount('joker_tables'),   runningCount('joker_tables'),
-      totalCount('ninecard_tables'),runningCount('ninecard_tables'),
+    // NOTE: collection names games.ts ke COLLECTION_MAP se match hone chahiye
+    // (camelCase) — pehle snake_case the jo kabhi exist hi nahi karte (hamesha 0)
+    const [pt, pr, lt, lr, jt, jr, nt, nr, tt, tr] = await Promise.all([
+      totalCount('pokerTables'),    runningCount('pokerTables'),
+      totalCount('ludoTables'),     runningCount('ludoTables'),
+      totalCount('jokerPairTables'),runningCount('jokerPairTables'),
+      totalCount('nineCardTables'), runningCount('nineCardTables'),
+      totalCount('tambolaTables'),  runningCount('tambolaTables'),
     ]);
     return {
       poker:    { total: pt, running: pr },
       ludo:     { total: lt, running: lr },
       joker:    { total: jt, running: jr },
       ninecard: { total: nt, running: nr },
+      tambola:  { total: tt, running: tr },
     };
   },
 };
