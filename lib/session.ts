@@ -22,7 +22,9 @@ export type SessionState =
   | 'games:await_kick_uid'
   | 'redeem:await_form'
   | 'ai:await_prompt'
-  | 'ai:await_agent_prompt';
+  | 'ai:await_agent_prompt'
+  | 'backup:await_file'
+  | 'backup:await_confirm';
 
 export interface SessionData {
   telegramId: number;

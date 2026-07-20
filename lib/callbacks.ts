@@ -108,6 +108,13 @@ export const CB = {
   aiModel:        'ai:model', // show model picker for current provider
   aiPickModel:    (key: string) => `ai:mp:${key}`, // key is a short alias, see MODEL_CHOICES in router
 
+  // Backup (export/import for account transfer)
+  backupMenu:            'bk:menu',
+  backupExport:          'bk:export',
+  backupImport:          'bk:import',
+  backupImportMerge:     'bk:im',  // confirm import (merge-safe)
+  backupImportOverwrite: 'bk:iow', // confirm import (overwrite)
+
   // Logs / server
   logsRecent: 'logs:recent',
   logsMine:   'logs:mine',

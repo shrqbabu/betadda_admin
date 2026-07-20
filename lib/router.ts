@@ -19,6 +19,7 @@ import {
   type AgentTurn, type WriteToolName,
 } from './ai';
 import { prefsStore } from './prefs';
+import { backupService } from './backup';
 import { config } from './config';
 import { MODELS } from './models';
 import { adminLogs } from './logs';
@@ -36,7 +37,7 @@ function homeKeyboard() {
     [kb.button('🎮 Games',     CB.games),     kb.button('🎁 Redeem',    CB.redeem)],
     [kb.button('📊 Reports',   CB.reports),   kb.button('📢 Broadcast', CB.broadcast)],
     [kb.button('🤖 AI',        CB.ai),        kb.button('⚙ Server',    CB.server)],
-    [kb.button('📋 Logs',      CB.logs)],
+    [kb.button('📋 Logs',      CB.logs),      kb.button('💾 Backup',    CB.backupMenu)],
   ]);
 }
 
@@ -218,6 +219,120 @@ function redeemMenuView() {
   };
 }
 
+function backupMenuView() {
+  return {
+    text: [
+      '💾 <b>Backup</b>',
+      '',
+      '<b>📤 Export</b> — full database ki JSON file yahin chat mein milegi.',
+      '<b>📥 Import</b> — export wali file bhejo, dusre account mein restore ho jayega.',
+      '',
+      '<i>Account transfer: purane bot se Export → naye bot me Import.</i>',
+    ].join('\n'),
+    keyboard: kb.build([
+      [kb.button('📤 Export Data', CB.backupExport), kb.button('📥 Import Data', CB.backupImport)],
+      backHomeRow(CB.home),
+    ]),
+  };
+}
+
+// ─── Backup handlers ────────────────────────────────────────────────────────
+async function handleBackupExport(chatId: number, telegramId: number): Promise<void> {
+  await telegram.sendMessage({ chat_id: chatId, text: '📤 Export chal raha hai… bade database par 20-30 sec lag sakte hain.' });
+  try {
+    const { json, totalDocs, perCollection } = await backupService.exportAll();
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const summary = Object.entries(perCollection)
+      .filter(([, n]) => n > 0)
+      .map(([c, n]) => `${c}: ${n}`)
+      .join(', ');
+    await telegram.sendDocumentContent(
+      chatId,
+      `backup-${stamp}.json`,
+      json,
+      `✅ <b>Export complete</b> — ${totalDocs} docs\n<i>${escapeHtml(truncate(summary, 300))}</i>\n\nIs file ko save rakho — Import isi se hoga.`
+    );
+    await adminLogs.record({ telegramId, module: 'backup', action: 'export', result: 'success', metadata: { totalDocs } });
+  } catch (err) {
+    const msg = (err as Error).message;
+    await adminLogs.record({ telegramId, module: 'backup', action: 'export', result: 'failure', errorMessage: msg });
+    await telegram.sendMessage({ chat_id: chatId, text: `❌ Export failed: ${escapeHtml(msg)}` });
+  }
+  const v = backupMenuView();
+  await telegram.sendMessage({ chat_id: chatId, text: v.text, reply_markup: v.keyboard });
+}
+
+async function handleBackupFile(chatId: number, telegramId: number, msg: TelegramMessage): Promise<void> {
+  const doc = msg.document;
+  if (!doc) {
+    await telegram.sendMessage({ chat_id: chatId, text: '📎 File attach karke bhejo (Export se mili .json file).\n\n/cancel to abort.' });
+    return;
+  }
+  if (doc.file_size && doc.file_size > 19 * 1024 * 1024) {
+    await telegram.sendMessage({ chat_id: chatId, text: '❌ File 20 MB se badi hai — Telegram bot itni badi file download nahi kar sakta.\nPC par <code>node scripts/import.js</code> use karo.' });
+    return;
+  }
+  try {
+    const buf = await telegram.downloadFile(doc.file_id);
+    const json = buf.toString('utf8');
+    const { manifest, total, nonEmpty } = backupService.inspect(json);
+
+    // Store only the file_id (session doc has a 1 MiB Firestore limit) —
+    // the file is re-downloaded from Telegram when the admin confirms.
+    await sessionStore.set(telegramId, chatId, 'backup:await_confirm', { backupFileId: doc.file_id });
+    const lines = nonEmpty.slice(0, 12).map(([c, n]) => `• ${escapeHtml(c)}: ${n}`);
+    if (nonEmpty.length > 12) lines.push(`…aur ${nonEmpty.length - 12} collections`);
+    await telegram.sendMessage({
+      chat_id: chatId,
+      text: [
+        '📥 <b>Backup file mil gayi</b>',
+        '',
+        `Source project: <code>${escapeHtml(manifest.projectId)}</code>`,
+        `Exported: ${escapeHtml(manifest.exportedAt)}`,
+        `Total docs: <b>${total}</b>`,
+        '',
+        ...lines,
+        '',
+        '<b>Merge</b> = jo docs pehle se hain unhe skip karo (safe)',
+        '<b>Overwrite</b> = backup ka data existing ke upar likh do ⚠️',
+      ].join('\n'),
+      reply_markup: kb.build([
+        [kb.button('✅ Import (Merge-safe)', CB.backupImportMerge)],
+        [kb.button('⚠️ Import (Overwrite)', CB.backupImportOverwrite)],
+        [kb.button('❌ Cancel', CB.cancel)],
+      ]),
+    });
+  } catch (err) {
+    await telegram.sendMessage({ chat_id: chatId, text: `❌ ${escapeHtml((err as Error).message)}\n\nDobara file bhejo ya /cancel.` });
+  }
+}
+
+async function handleBackupImportConfirm(chatId: number, telegramId: number, overwrite: boolean): Promise<void> {
+  const session = await sessionStore.get(telegramId);
+  const fileId = session?.context?.backupFileId;
+  if (session?.state !== 'backup:await_confirm' || typeof fileId !== 'string') {
+    await telegram.sendMessage({ chat_id: chatId, text: '❌ Session expire ho gaya — Backup menu se dobara file bhejo.' });
+    return showHome(chatId);
+  }
+  await sessionStore.clear(telegramId);
+  await telegram.sendMessage({ chat_id: chatId, text: `📥 Import chal raha hai (${overwrite ? 'overwrite' : 'merge-safe'})…` });
+  try {
+    const json = (await telegram.downloadFile(fileId)).toString('utf8');
+    const { written, skipped, perCollection } = await backupService.importAll(json, overwrite);
+    const lines = Object.entries(perCollection).map(([c, s]) => `• ${escapeHtml(c)}: ${escapeHtml(s)}`);
+    await telegram.sendMessage({
+      chat_id: chatId,
+      text: [`✅ <b>Import complete</b> — ${written} written${skipped ? `, ${skipped} skipped` : ''}`, '', ...lines].join('\n'),
+      reply_markup: kb.build([backHomeRow(CB.home)]),
+    });
+    await adminLogs.record({ telegramId, module: 'backup', action: overwrite ? 'import_overwrite' : 'import_merge', result: 'success', metadata: { written, skipped } });
+  } catch (err) {
+    const msg = (err as Error).message;
+    await adminLogs.record({ telegramId, module: 'backup', action: 'import', result: 'failure', errorMessage: msg });
+    await telegram.sendMessage({ chat_id: chatId, text: `❌ Import failed: ${escapeHtml(msg)}`, reply_markup: kb.build([backHomeRow(CB.home)]) });
+  }
+}
+
 function renderUserCard(u: NonNullable<Awaited<ReturnType<typeof usersService.findByUid>>>) {
   const lines = [
     '👤 <b>User</b>', '',
@@ -299,6 +414,11 @@ async function handleMessage(msg: TelegramMessage, telegramId: number): Promise<
     case 'redeem:await_form':            return handleRedeemForm(chatId, telegramId, text, ctx);
     case 'ai:await_prompt':              return handleAiPrompt(chatId, telegramId, text, ctx);
     case 'ai:await_agent_prompt':        return handleAiAgentPrompt(chatId, telegramId, text, ctx);
+    case 'backup:await_file':            return handleBackupFile(chatId, telegramId, msg);
+    case 'backup:await_confirm': {
+      await telegram.sendMessage({ chat_id: chatId, text: 'Upar wale buttons se choose karo — Merge, Overwrite ya Cancel.' });
+      return;
+    }
     default:
       await sessionStore.clear(telegramId);
       return showHome(chatId);
@@ -328,6 +448,16 @@ async function handleCallback(cb: TelegramCallbackQuery, telegramId: number): Pr
   if (data === CB.server)    { const v = serverInfoView();    return sendOrEdit(chatId, v.text, v.keyboard, msgId); }
   if (data === CB.games)     { const v = gamesMenuView();     return sendOrEdit(chatId, v.text, v.keyboard, msgId); }
   if (data === CB.redeem)    { const v = redeemMenuView();    return sendOrEdit(chatId, v.text, v.keyboard, msgId); }
+
+  // Backup (export/import)
+  if (data === CB.backupMenu) { await sessionStore.clear(telegramId); const v = backupMenuView(); return sendOrEdit(chatId, v.text, v.keyboard, msgId); }
+  if (data === CB.backupExport) return handleBackupExport(chatId, telegramId);
+  if (data === CB.backupImport) {
+    await sessionStore.set(telegramId, chatId, 'backup:await_file');
+    return void telegram.sendMessage({ chat_id: chatId, text: '📥 Export se mili <b>backup .json file</b> yahan bhejo (document ki tarah attach karke).\n\n/cancel to abort.' });
+  }
+  if (data === CB.backupImportMerge)     return handleBackupImportConfirm(chatId, telegramId, false);
+  if (data === CB.backupImportOverwrite) return handleBackupImportConfirm(chatId, telegramId, true);
 
   // Users
   if (data === CB.usersSearch) {

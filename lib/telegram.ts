@@ -71,6 +71,31 @@ export const telegram = {
       reply_markup: keyboard,
     });
   },
+  /** Upload a document from in-memory content (multipart), e.g. a generated backup file. */
+  async sendDocumentContent(chatId: number | string, filename: string, content: string | Buffer, caption?: string): Promise<unknown> {
+    const url = `${config.telegram.apiBase}/bot${config.telegram.botToken}/sendDocument`;
+    const form = new FormData();
+    form.append('chat_id', String(chatId));
+    if (caption) { form.append('caption', caption); form.append('parse_mode', 'HTML'); }
+    const bytes = typeof content === 'string' ? Buffer.from(content, 'utf8') : content;
+    form.append('document', new Blob([bytes], { type: 'application/json' }), filename);
+    const res = await fetch(url, { method: 'POST', body: form });
+    const data = (await res.json().catch(() => null)) as TgResponse<unknown> | null;
+    if (!res.ok || !data?.ok) {
+      logger.error('telegram.sendDocumentContent.failed', { status: res.status, description: data?.description });
+      throw new Error(`Telegram upload failed: ${data?.description || res.status}`);
+    }
+    return data.result;
+  },
+  /** Download a file the user sent to the bot (bot API limit: ≤20 MB). */
+  async downloadFile(fileId: string): Promise<Buffer> {
+    const info = await call<{ file_path?: string }>('getFile', { file_id: fileId });
+    if (!info.file_path) throw new Error('Telegram ne file_path nahi diya');
+    const url = `${config.telegram.apiBase}/file/bot${config.telegram.botToken}/${info.file_path}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`File download failed: HTTP ${res.status}`);
+    return Buffer.from(await res.arrayBuffer());
+  },
   async deleteMessage(chatId: number | string, messageId: number): Promise<unknown> {
     return call('deleteMessage', { chat_id: chatId, message_id: messageId });
   },
