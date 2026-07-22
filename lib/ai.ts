@@ -379,6 +379,70 @@ export const aiService = {
       return { ok: false, error: msg };
     }
   },
+
+  /**
+   * Low-level chat completion over the active provider (Bedrock → OpenRouter).
+   * Used by the public /api/chat endpoint, which passes its own system prompt
+   * and rolling history. Returns the reply plus which provider/model answered.
+   */
+  async chatCompletion(
+    message: string,
+    opts?: {
+      system?: string;
+      history?: OpenRouterMessage[];
+      temperature?: number;
+      maxTokens?: number;
+    },
+  ): Promise<{ ok: true; reply: string; provider: string; model: string } | { ok: false; error: string }> {
+    const provider = resolveChatProvider();
+    if (!provider.apiKey) {
+      return { ok: false, error: `AI is not configured (missing ${provider.name === 'bedrock' ? 'BEDROCK_API_KEY' : 'OPENROUTER_API_KEY'}).` };
+    }
+
+    const messages: OpenRouterMessage[] = [];
+    if (opts?.system && opts.system.trim()) {
+      messages.push({ role: 'system', content: opts.system });
+    }
+    for (const m of (opts?.history || []).slice(-20)) {
+      if ((m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string') {
+        messages.push({ role: m.role, content: m.content });
+      }
+    }
+    messages.push({ role: 'user', content: truncate(message, 6000) });
+
+    try {
+      const res = await httpRequest<OpenRouterResponse>(
+        `${provider.apiBase}/chat/completions`,
+        {
+          method: 'POST',
+          timeoutMs: 25_000,
+          headers: {
+            'Authorization': `Bearer ${provider.apiKey}`,
+            ...provider.headers,
+          },
+          body: {
+            model: provider.model,
+            messages,
+            temperature: opts?.temperature ?? 0.5,
+            max_tokens: opts?.maxTokens ?? 1024,
+          },
+        },
+      );
+
+      const reply = res.data?.choices?.[0]?.message?.content?.trim() ?? '';
+      if (!reply) {
+        const errMsg = res.data?.error?.message || 'Empty AI reply';
+        logger.error('ai.chat.empty', { provider: provider.name, model: provider.model, errMsg });
+        return { ok: false, error: errMsg };
+      }
+      logger.info('ai.chat.ok', { provider: provider.name, model: provider.model, replyLen: reply.length });
+      return { ok: true, reply, provider: provider.name, model: provider.model };
+    } catch (err) {
+      const msg = (err as Error).message;
+      logger.error('ai.chat.failed', { provider: provider.name, model: provider.model, error: msg });
+      return { ok: false, error: msg };
+    }
+  },
 };
 
 // ─── AGENT MODE (tool-calling) ──────────────────────────────────────────────

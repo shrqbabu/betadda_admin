@@ -1,25 +1,25 @@
 // api/chat.ts
-// Public AI chat endpoint (NVIDIA-backed). Callable from other domains (CORS).
+// Public AI chat endpoint (Bedrock → OpenRouter). Callable from other domains (CORS).
 //
 // POST /api/chat
-//   Body: { message: string, model?: string, history?: [{role, content}], system?: string, fallbacks?: string[] }
+//   Body: { message: string, history?: [{role, content}], system?: string }
 //   Headers: x-api-key (if PUBLIC_API_KEY env var is set)
 //
 // GET /api/chat  → health check.
+//
+// Provider is resolved in lib/ai.ts (resolveChatProvider): Bedrock when
+// BEDROCK_API_KEY is set, else OpenRouter. NVIDIA is no longer used here.
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { nvidiaChat, type NvidiaTurn } from '../lib/nvidia';
-import { resolveModel } from '../lib/models';
+import { aiService } from '../lib/ai';
 import { config } from '../lib/config';
 import { applyCors, checkPublicApiKey } from '../lib/cors';
 import { logger } from '../lib/logger';
 
 interface ChatBody {
   message: string;
-  model?: string;
   system?: string;
   history?: Array<{ role: 'user' | 'assistant'; content: string }>;
-  fallbacks?: string[];
 }
 
 function parseBody(req: VercelRequest): ChatBody | null {
@@ -39,7 +39,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   if (applyCors(req, res)) return;
 
   if (req.method === 'GET') {
-    res.status(200).json({ ok: true, service: 'ai-chat', provider: 'nvidia' });
+    const provider = config.bedrock.apiKey ? 'bedrock' : 'openrouter';
+    res.status(200).json({ ok: true, service: 'ai-chat', provider });
     return;
   }
 
@@ -56,33 +57,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
   const body = parseBody(req);
   if (!body) {
-    res.status(400).json({ ok: false, error: 'Invalid body — { message: string, model?: string, history?, system?, fallbacks? } required.' });
+    res.status(400).json({ ok: false, error: 'Invalid body — { message: string, history?, system? } required.' });
     return;
   }
 
-  const modelId = resolveModel(body.model, config.nvidia.model);
-  const fallbacks = Array.isArray(body.fallbacks)
-    ? body.fallbacks.map(m => resolveModel(m, m))
-    : undefined;
-
-  const turns: NvidiaTurn[] = (body.history || [])
+  const history = (body.history || [])
     .filter(t => t && (t.role === 'user' || t.role === 'assistant') && typeof t.content === 'string')
     .slice(-20);
-  turns.push({ role: 'user', content: body.message });
 
   try {
-    const r = await nvidiaChat(turns, {
-      model: modelId,
-      fallbacks,
-      systemPrompt: body.system,
+    const r = await aiService.chatCompletion(body.message, {
+      system: body.system,
+      history,
       temperature: 0.5,
       maxTokens: 1024,
     });
     if (!r.ok) {
-      res.status(502).json({ ok: false, error: r.error, model: modelId });
+      res.status(502).json({ ok: false, error: r.error });
       return;
     }
-    res.status(200).json({ ok: true, reply: r.reply, model: r.model });
+    res.status(200).json({ ok: true, reply: r.reply, model: r.model, provider: r.provider });
   } catch (err) {
     const msg = (err as Error).message;
     logger.error('api.chat.unhandled', { error: msg });
