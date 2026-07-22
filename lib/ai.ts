@@ -180,6 +180,38 @@ function renderSupportContext(ctx: SupportContext | undefined): string {
   return `\n\n===== USER CONTEXT (backend-verified, prefer over guessing) =====\n${lines.join('\n')}\n===== END CONTEXT =====`;
 }
 
+/**
+ * Resolve the active OpenAI-compatible chat endpoint.
+ *
+ * Both AWS Bedrock and OpenRouter speak the same `/chat/completions` shape,
+ * so we pick one provider and share the request builder across all call sites.
+ * Bedrock is preferred whenever BEDROCK_API_KEY is configured ("pehle yeh
+ * use hoga"); OpenRouter is the kept fallback for when Bedrock is not set.
+ */
+export function resolveChatProvider(
+  overrideModel?: string,
+): { name: 'bedrock' | 'openrouter'; apiBase: string; apiKey: string; model: string; headers: Record<string, string> } {
+  if (config.bedrock.apiKey) {
+    return {
+      name: 'bedrock',
+      apiBase: config.bedrock.apiBase,
+      apiKey:  config.bedrock.apiKey,
+      model:   overrideModel || config.bedrock.model,
+      headers: { 'OpenAI-Project': config.bedrock.project },
+    };
+  }
+  return {
+    name: 'openrouter',
+    apiBase: config.openrouter.apiBase,
+    apiKey:  config.openrouter.apiKey,
+    model:   overrideModel || config.openrouter.model,
+    headers: {
+      'HTTP-Referer': config.openrouter.siteUrl,
+      'X-Title':      config.openrouter.siteName,
+    },
+  };
+}
+
 export const aiService = {
   /**
    * Multi-turn admin chat. Pass `history` (previous user/assistant turns) to
@@ -220,10 +252,10 @@ export const aiService = {
       return r.ok ? { ok: true, reply: r.reply } : { ok: false, error: r.error };
     }
 
-    if (!config.openrouter.apiKey) {
-      return { ok: false, error: 'OpenRouter is not configured (missing OPENROUTER_API_KEY).' };
+    const provider = resolveChatProvider(prefs?.openrouterModel);
+    if (!provider.apiKey) {
+      return { ok: false, error: `AI is not configured (missing ${provider.name === 'bedrock' ? 'BEDROCK_API_KEY' : 'OPENROUTER_API_KEY'}).` };
     }
-    const openrouterModel = prefs?.openrouterModel || config.openrouter.model;
 
     const messages: OpenRouterMessage[] = [
       { role: 'system', content: SYSTEM_PROMPTS[mode] },
@@ -233,17 +265,16 @@ export const aiService = {
 
     try {
       const res = await httpRequest<OpenRouterResponse>(
-        `${config.openrouter.apiBase}/chat/completions`,
+        `${provider.apiBase}/chat/completions`,
         {
           method: 'POST',
           timeoutMs: 25_000,
           headers: {
-            'Authorization': `Bearer ${config.openrouter.apiKey}`,
-            'HTTP-Referer':  config.openrouter.siteUrl,
-            'X-Title':       config.openrouter.siteName,
+            'Authorization': `Bearer ${provider.apiKey}`,
+            ...provider.headers,
           },
           body: {
-            model: openrouterModel,
+            model: provider.model,
             messages,
             temperature: mode === 'code' ? 0.2 : 0.5,
             max_tokens: 1024,
@@ -290,8 +321,9 @@ export const aiService = {
     context?: SupportContext,
     history?: OpenRouterMessage[],
   ): Promise<{ ok: true; reply: string } | { ok: false; error: string }> {
-    if (!config.openrouter.apiKey) {
-      return { ok: false, error: 'OpenRouter is not configured (missing OPENROUTER_API_KEY).' };
+    const provider = resolveChatProvider();
+    if (!provider.apiKey) {
+      return { ok: false, error: `AI is not configured (missing ${provider.name === 'bedrock' ? 'BEDROCK_API_KEY' : 'OPENROUTER_API_KEY'}).` };
     }
 
     const systemContent = SUPPORT_SYSTEM_PROMPT + renderSupportContext(context);
@@ -307,17 +339,16 @@ export const aiService = {
 
     try {
       const res = await httpRequest<OpenRouterResponse>(
-        `${config.openrouter.apiBase}/chat/completions`,
+        `${provider.apiBase}/chat/completions`,
         {
           method: 'POST',
           timeoutMs: 25_000,
           headers: {
-            'Authorization': `Bearer ${config.openrouter.apiKey}`,
-            'HTTP-Referer':  config.openrouter.siteUrl,
-            'X-Title':       config.openrouter.siteName,
+            'Authorization': `Bearer ${provider.apiKey}`,
+            ...provider.headers,
           },
           body: {
-            model: config.openrouter.model,
+            model: provider.model,
             messages,
             temperature: 0.4, // slightly grounded — this is customer support
             max_tokens: 800,
@@ -861,8 +892,9 @@ export async function askAgent(
   userMessage: string,
   adminId: number,
 ): Promise<AgentResult> {
-  if (!config.openrouter.apiKey) {
-    return { kind: 'error', error: 'OpenRouter not configured (OPENROUTER_API_KEY missing).', history };
+  const provider = resolveChatProvider();
+  if (!provider.apiKey) {
+    return { kind: 'error', error: `AI not configured (missing ${provider.name === 'bedrock' ? 'BEDROCK_API_KEY' : 'OPENROUTER_API_KEY'}).`, history };
   }
 
   const messages: AgentTurn[] = [
@@ -882,17 +914,16 @@ export async function askAgent(
     while (true) {
       try {
         const res = await httpRequest<AgentCallResponse>(
-          `${config.openrouter.apiBase}/chat/completions`,
+          `${provider.apiBase}/chat/completions`,
           {
             method: 'POST',
             timeoutMs: 30_000,
             headers: {
-              'Authorization': `Bearer ${config.openrouter.apiKey}`,
-              'HTTP-Referer':  config.openrouter.siteUrl,
-              'X-Title':       config.openrouter.siteName,
+              'Authorization': `Bearer ${provider.apiKey}`,
+              ...provider.headers,
             },
             body: {
-              model: config.openrouter.model,
+              model: provider.model,
               messages,
               tools: AGENT_TOOLS,
               tool_choice: 'auto',
@@ -914,18 +945,18 @@ export async function askAgent(
         }
         const msg = (err as Error).message;
         const body = err instanceof HttpError ? err.body.slice(0, 400) : '';
-        logger.error('ai.agent.http_failed', { error: msg, body, model: config.openrouter.model, adminId });
+        logger.error('ai.agent.http_failed', { error: msg, body, provider: provider.name, model: provider.model, adminId });
         if (isRateLimit) {
           return {
             kind: 'error',
-            error: 'AI service rate-limited (HTTP 429). Free-tier limit hit — ruk ke try karo, ya OPENROUTER_MODEL paid model pe switch karo.',
+            error: 'AI service rate-limited (HTTP 429). Ruk ke try karo, ya model/provider switch karo.',
             history,
           };
         }
         if (err instanceof HttpError && err.status === 404) {
           return {
             kind: 'error',
-            error: `Model not found on OpenRouter: "${config.openrouter.model}". Check OPENROUTER_MODEL env var. Try google/gemini-2.0-flash-exp:free or openai/gpt-4o-mini.\n\nDetails: ${body}`,
+            error: `Model not found on ${provider.name}: "${provider.model}". Check ${provider.name === 'bedrock' ? 'BEDROCK_MODEL' : 'OPENROUTER_MODEL'} env var.\n\nDetails: ${body}`,
             history,
           };
         }
