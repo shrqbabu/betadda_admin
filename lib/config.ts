@@ -48,10 +48,10 @@ export const config = {
   },
   openrouter: {
     apiKey:  opt('OPENROUTER_API_KEY'),
-    model:   opt('OPENROUTER_MODEL', 'google/gemini-2.5-flash-lite'),
+    model:   opt('OPENROUTER_MODEL', 'zai.glm-4.7'),
     siteUrl: opt('OPENROUTER_SITE_URL', 'https://vercel.app'),
     siteName:opt('OPENROUTER_SITE_NAME', 'Telegram Admin Backend'),
-    apiBase: 'https://openrouter.ai/api/v1',
+    apiBase: 'https://bedrock-mantle.us-east-1.api.aws/v1',
   },
   nvidia: {
     apiKey:    opt('NVIDIA_API_KEY'),
