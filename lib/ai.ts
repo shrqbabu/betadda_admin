@@ -287,6 +287,7 @@ export const aiService = {
         const errMsg = res.data?.error?.message || 'Empty AI reply';
         await adminLogs.record({
           telegramId: adminId, module: 'ai', action: mode, result: 'failure', errorMessage: errMsg,
+          metadata: { provider: provider.name, model: provider.model },
         });
         return { ok: false, error: errMsg };
       }
@@ -294,13 +295,15 @@ export const aiService = {
       await adminLogs.record({
         telegramId: adminId, module: 'ai', action: mode, result: 'success',
         description: truncate(trimmed, 200),
+        metadata: { provider: provider.name, model: provider.model },
       });
       return { ok: true, reply };
     } catch (err) {
       const msg = (err as Error).message;
-      logger.error('ai.ask.failed', { error: msg, mode });
+      logger.error('ai.ask.failed', { error: msg, mode, provider: provider.name, model: provider.model });
       await adminLogs.record({
         telegramId: adminId, module: 'ai', action: mode, result: 'failure', errorMessage: msg,
+        metadata: { provider: provider.name, model: provider.model },
       });
       return { ok: false, error: msg };
     }
